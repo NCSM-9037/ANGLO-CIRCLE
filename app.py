@@ -1,78 +1,107 @@
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
-import openai, os, random
+import openai
+import os
+import sqlite3
 
 app = Flask(__name__)
 
+# ==============================
+# OpenAI Key (from Render env)
+# ==============================
 openai.api_key = os.getenv("OPENAI_KEY")
 
 
-# ---------- AI FUNCTION ----------
-def ask_ai(prompt):
+# ==============================
+# DATABASE (auto creates chat.db)
+# ==============================
+conn = sqlite3.connect("chat.db", check_same_thread=False)
+cursor = conn.cursor()
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS messages(
+    phone TEXT,
+    role TEXT,
+    content TEXT
+)
+""")
+conn.commit()
+
+
+def save_msg(phone, role, content):
+    cursor.execute(
+        "INSERT INTO messages VALUES (?, ?, ?)",
+        (phone, role, content)
+    )
+    conn.commit()
+
+
+def load_history(phone):
+    cursor.execute(
+        "SELECT role, content FROM messages WHERE phone=? ORDER BY rowid DESC LIMIT 10",
+        (phone,)
+    )
+    rows = cursor.fetchall()
+    return rows[::-1]
+
+
+# ==============================
+# OpenAI Chat
+# ==============================
+def ask_ai(messages):
     response = openai.ChatCompletion.create(
         model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt}]
+        messages=messages
     )
     return response.choices[0].message.content
 
 
-# ---------- PASTE YOUR BOT FUNCTION HERE ----------
+# ==============================
+# BOT ROUTE
+# ==============================
 @app.route("/bot", methods=["POST"])
 def bot():
 
-    msg = request.form.get("Body").lower().strip()
+    user_msg = request.form.get("Body")
+    phone = request.form.get("From")
+
     resp = MessagingResponse()
 
-    # ---------------- WELCOME ----------------
-    if msg in ["hi", "hello", "hey", "start"]:
-        reply = """👋 Hello, I am a Grammar Bot
-Created by Anglo Circle (2026–27)
-📍 MHS Edupark
+    history = load_history(phone)
 
-Type 'help' to see commands 😊
+    messages = [{
+        "role": "system",
+        "content": """
+You are an English Teacher.
+
+Rules:
+- ONLY teach English
+- Correct grammar
+- Teach vocabulary
+- Explain simply
+- Give Malayalam meanings when useful
+- If user asks unrelated topics, redirect to English learning politely
 """
+    }]
 
-    # ---------------- HELP ----------------
-    elif msg == "help":
-        reply = """📘 HOW TO USE
+    # add history
+    for role, content in history:
+        messages.append({"role": role, "content": content})
 
-correct <sentence>
-meaning <word>
-daily
-quiz
-about
-credit
-"""
+    messages.append({"role": "user", "content": user_msg})
 
-    # ---------------- ABOUT ----------------
-    elif msg == "about":
-        reply = "This is an AI-powered English Grammar Assistant."
+    reply = ask_ai(messages)
 
-    # ---------------- CREDIT ----------------
-    elif msg == "credit":
-        reply = "Developed by Anglo Circle English Club | Secretary: Rashid"
-
-    # ---------------- FEATURES ----------------
-    elif msg.startswith("correct"):
-        reply = ask_ai(f"Correct grammar and explain simply with Malayalam: {msg}")
-
-    elif msg.startswith("meaning"):
-        reply = ask_ai(f"Meaning + Malayalam meaning: {msg}")
-
-    elif msg == "daily":
-        word = random.choice(["Serene","Resilient","Gratitude","Eloquent"])
-        reply = ask_ai(f"Explain meaning of {word} with Malayalam")
-
-    elif msg == "quiz":
-        reply = "Quiz: He ___ to school daily (go/goes)"
-
-    else:
-        reply = "Type 'help' to see commands 😊"
+    # save to DB
+    save_msg(phone, "user", user_msg)
+    save_msg(phone, "assistant", reply)
 
     resp.message(reply)
     return str(resp)
 
 
-# ---------- START SERVER ----------
+# ==============================
+# RUN
+# ==============================
 if __name__ == "__main__":
     app.run()
